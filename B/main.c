@@ -1,13 +1,15 @@
 #include "general.h"
 #include "signals.h"
 #include "pkt_handler.h"
+#include "inspect.h"
 
 pcap_t *handle = NULL;     // Made handle a global variable for handling Ctrl-C signal interrupt
 int pkt_num = 0;
 int selected_proto = 0;
 int session_occur = 0;
+int ctrlc = 0;
 
-//PacketRecord sniff_log[MAX_PACKETS];    // Stored the packets from the latest sniffing session
+PacketRecord sniff_log[MAX_PACKETS];    // Stored the packets from the latest sniffing session
 
 int main(){
     signal(SIGINT, sigint_handler);
@@ -53,7 +55,7 @@ int main(){
 
         if(ret == EOF){   // Exit C-Shark when user presses Ctrl-D
             printf("^D\n");
-            exit(1);
+            return 0;
         }
 
         // Error message if the user enters an invalid number
@@ -79,20 +81,48 @@ int main(){
             int val = scanf("%d", &option);
             if(val == EOF){
                 printf("^D\n");
-                break;
+                return 0;
             }
             printf("\n");
 
             if(option == 1){
                 pkt_num = 0;
 
-                handle = pcap_open_live(selected_int->name, 65536, 1, 0, errbuf);    // Handle of device to be sniffed
+                handle = pcap_open_live(selected_int->name, 65536, 1, 1, errbuf);    // Handle of device to be sniffed
                 if(handle == NULL){
                     fprintf(stderr, "Couldn't open device for sniffing.\n\n");
                     continue;
                 }
 
-                pcap_loop(handle, -1, packet_handler, NULL);
+                if(!session_occur) session_occur = 1;
+
+                while(ctrlc == 0){
+                    fd_set rfds;
+                    FD_ZERO(&rfds);
+                    FD_SET(STDIN_FILENO, &rfds);
+
+                    struct timeval tv;
+                    tv.tv_sec = 0;
+                    tv.tv_usec = 10;
+
+                    int select_ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+                    if(select_ret == -1){
+                        fprintf(stderr, "Error: select() failure.\n\n");
+                        break;
+                    }
+
+                    if(select_ret == 0){
+                        pcap_dispatch(handle, -1, packet_handler, NULL);
+                    }
+
+                    if(FD_ISSET(STDIN_FILENO, &rfds)){
+                        char ctrld[1024];
+                        if(fgets(ctrld, sizeof(ctrld), stdin) == NULL){
+                            printf("^D\n");
+                            return 0;
+                        }
+                    }
+                }
             }
 
             else if(option == 2){
@@ -108,14 +138,18 @@ int main(){
 
                 selected_proto = 0;
                 printf("Enter your option: ");
-                scanf("%d", &selected_proto);
+                int ded = scanf("%d", &selected_proto);
+                if(ded == EOF){
+                    printf("^D\n");
+                    return 0;
+                }
 
                 if(selected_proto < 1 || selected_proto > 6){
                     fprintf(stderr, "Invalid option selected.\n\n");
                     continue;
                 }
 
-                handle = pcap_open_live(selected_int->name, 65536, 1, 0, errbuf);  // Handle of device to be sniffed
+                handle = pcap_open_live(selected_int->name, 65536, 1, 1, errbuf);  // Handle of device to be sniffed
                 if(handle == NULL){
                     fprintf(stderr, "Couldn't open device for sniffing.\n\n");
                     continue;
@@ -161,20 +195,65 @@ int main(){
 
                 pcap_freecode(&fp);
 
-                pcap_loop(handle, -1, packet_handler, NULL);
+                if(!session_occur) session_occur = 1; 
+
+                while(ctrlc == 0){
+                    // Handling Ctrl-D using select
+                    fd_set rfds;
+                    FD_ZERO(&rfds);
+                    FD_SET(STDIN_FILENO, &rfds);
+
+                    struct timeval tv;
+                    tv.tv_sec = 0;
+                    tv.tv_usec = 10;
+
+                    int select_ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+                    if(select_ret == -1){
+                        fprintf(stderr, "Error: select() failure.\n\n");
+                        break;
+                    } 
+                    
+                    if(select_ret == 0){
+                        pcap_dispatch(handle, -1, packet_handler, NULL);
+                    }
+
+                    if(FD_ISSET(STDIN_FILENO, &rfds)){
+                        char ctrld[1024];
+                        if(fgets(ctrld, sizeof(ctrld), stdin) == NULL){
+                            printf("^D\n");
+                            return 0;
+                        }
+                    }
+                }
             }
 
             else if(option == 3){
-                /*int analyse_num = 0;
-                printf("Enter the number of the packet to inspect: ");
-                scanf("%d", &analyse_num);
-                
-                if(analyse_num < 1 || analyse_num >= pkt_num){
-                    fprintf(stderr, "Invalid packet number entered.\n\n");
+                if(!session_occur){
+                    printf("There hasn't been any sniffing session yet.\n\n");
                     continue;
                 }
 
-                inspect_packet(analyse_num);*/
+                print_session();
+                printf("\n");
+
+                int analyse_num = 0;
+
+                while(1){
+                    printf("Enter the number of the packet to inspect: ");
+                    int inp = scanf("%d", &analyse_num);
+                    if(inp == EOF){
+                        printf("^D\n");
+                        return 0;
+                    }
+                    printf("\n");
+                    
+                    if(analyse_num < 1 || analyse_num > pkt_num){
+                        fprintf(stderr, "Invalid packet number entered.\n\n");
+                        continue;
+                    }
+
+                    inspect_packet(analyse_num);
+                }
             }
 
             // If option 4 is selected, break out of the loop to exit

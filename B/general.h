@@ -1,3 +1,6 @@
+#ifndef GENERAL_H
+#define GENERAL_H
+
 #include <pcap.h>
 #include <net/ethernet.h>
 #include <netinet/ip.h>
@@ -24,16 +27,19 @@ extern pcap_t *handle;
 extern int pkt_num;
 extern int selected_proto;
 extern int session_occur;
+extern int ctrlc;
 
 typedef unsigned char u_char;
 
-/*typedef struct PacketRecord{
+typedef struct PacketRecord{
     char timestamp[20];
     int frame_length;
     int captured_length;
     u_char *packet;
 } PacketRecord;
 
-extern PacketRecord sniff_log[MAX_PACKETS];*/
+extern PacketRecord sniff_log[MAX_PACKETS];
 
 pcap_if_t *find_interface(pcap_if_t *alldevs, int index);
+
+#endif // GENERAL_H

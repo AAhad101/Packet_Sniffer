@@ -4,14 +4,14 @@
 
 void packet_handler(u_char *user, const struct pcap_pkthdr *header, const u_char *packet){
     // Add packet to be process in the sniff_log array
-    /*snprintf(sniff_log[pkt_num].timestamp, sizeof(sniff_log[pkt_num].timestamp),
+    snprintf(sniff_log[pkt_num].timestamp, sizeof(sniff_log[pkt_num].timestamp),
              "%02ld:%02ld:%02ld.%06ld", (header->ts.tv_sec / 3600) % 24, (header->ts.tv_sec / 60) % 60, 
              header->ts.tv_sec % 60, header->ts.tv_usec);
     
     sniff_log[pkt_num].frame_length = header->len;
     sniff_log[pkt_num].captured_length = header->caplen;
     sniff_log[pkt_num].packet = (u_char *)malloc(header->caplen);   // Allocating space for the packet
-    memcpy(sniff_log[pkt_num].packet, packet, header->caplen);*/
+    memcpy(sniff_log[pkt_num].packet, packet, header->caplen);
 
     // Incrementing since packet number to be printed starts from 1
     pkt_num++;
@@ -551,7 +551,7 @@ void print_l3_arp(const u_char *packet, int caplen, int len_to_skip){
 void print_l2(const u_char *packet, int caplen){
     // reading relevant data from the ethernet header
     struct ethhdr *eth = (struct ethhdr *)packet;
-    printf("l2 (Ethernet): Dst MAC: %.2X-%.2X-%.2X-%.2X-%.2X-%.2X | ", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
+    printf("L2 (Ethernet): Dst MAC: %.2X-%.2X-%.2X-%.2X-%.2X-%.2X | ", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
     printf("Src MAC: %.2X-%.2X-%.2X-%.2X-%.2X-%.2X | ", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
 
     uint16_t ether_type = ntohs(eth->h_proto);

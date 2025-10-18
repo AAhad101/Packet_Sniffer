@@ -6,5 +6,6 @@ void sigint_handler(){
         printf("\n\n");
         pcap_breakloop(handle);
         handle = NULL;
+        ctrlc = 1;
     }
 }

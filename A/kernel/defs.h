@@ -183,3 +183,16 @@ void            virtio_disk_intr(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+// Forward declaration for compilation
+struct vmap;
+
+// vm.c additions
+uint64 demand_resolve(struct proc *p, pagetable_t pt, uint64 va, const char *access);
+int ismapped(pagetable_t pagetable, uint64 va); // already exists; keep
+const char* classify_fault_cause(struct proc *p, uint64 va);
+int is_exec_vaddr(struct proc *p, uint64 va, struct vmap *out);
+
+void fifo_enqueue(struct proc *p, uint64 va, int kind, int seq);
+int fifo_remove_va(struct proc *p, uint64 va); // returns 1 if removed
+int try_evict_one(struct proc *p); // returns 1 if evicted a page

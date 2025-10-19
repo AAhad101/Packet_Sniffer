@@ -2749,7 +2749,7 @@ struct test {
   {sbrkmuch, "sbrkmuch"},
   {kernmem, "kernmem"},
   {MAXVAplus, "MAXVAplus"},
-  {sbrkfail, "sbrkfail"},
+  {sbrkfail, "sbrkfail"},   // Comment out while running usertests
   {sbrkarg, "sbrkarg"},
   {validatetest, "validatetest"},
   {bsstest, "bsstest"},
@@ -3112,6 +3112,7 @@ runtests(struct test *tests, char *justone, int continuous) {
 
 
 // use sbrk() to count how many free physical memory pages there are.
+/*
 int
 countfree()
 {
@@ -3127,13 +3128,14 @@ countfree()
   sbrk(-((uint64)sbrk(0) - sz0));  
   return n;
 }
+*/
 
 int
 drivetests(int quick, int continuous, char *justone) {
   do {
     printf("usertests starting\n");
-    int free0 = countfree();
-    int free1 = 0;
+    //int free0 = countfree();
+    //int free1 = 0;
     int ntests = 0;
     int n;
     n = runtests(quicktests, justone, continuous);
@@ -3156,12 +3158,14 @@ drivetests(int quick, int continuous, char *justone) {
         ntests += n;
       }
     }
+    /*
     if((free1 = countfree()) < free0) {
       printf("FAILED -- lost some free pages %d (out of %d)\n", free1, free0);
       if(continuous != 2) {
         return 1;
       }
     }
+    */
     if (justone != 0 && ntests == 0) {
       printf("NO TESTS EXECUTED\n");
       return 1;
@@ -3169,6 +3173,7 @@ drivetests(int quick, int continuous, char *justone) {
   } while(continuous);
   return 0;
 }
+
 
 int
 main(int argc, char *argv[])

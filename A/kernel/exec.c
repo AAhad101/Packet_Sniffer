@@ -7,7 +7,7 @@
 #include "defs.h"
 #include "elf.h"
 
-static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
+//static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
 // map ELF permissions to PTE permission bits.
 int flags2perm(int flags)
@@ -55,8 +55,13 @@ kexec(char *path, char **argv)
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
-  // Load program into memory.
-  for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
+  // Record loadable segments; do not map or load now (demand paging).
+  p->vmaps_len = 0;
+  p->text_lo = p->text_hi = 0;
+  p->data_lo = p->data_hi = 0;
+  sz = 0;
+
+  for(i = 0, off = elf.phoff; i < elf.phnum; i++, off += sizeof(ph)){
     if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
     if(ph.type != ELF_PROG_LOAD)
@@ -67,13 +72,39 @@ kexec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
+
+    if(p->vmaps_len >= MAX_VMAPS)
       goto bad;
-    sz = sz1;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
-      goto bad;
+
+    // Record vmap
+    p->vmaps[p->vmaps_len].vaddr  = ph.vaddr;
+    p->vmaps[p->vmaps_len].memsz  = ph.memsz;
+    p->vmaps[p->vmaps_len].filesz = ph.filesz;
+    p->vmaps[p->vmaps_len].off    = ph.off;
+    p->vmaps[p->vmaps_len].perms  = flags2perm(ph.flags);
+    p->vmaps_len++;
+
+    // Track text/data ranges for logging and heap_start
+    uint64 seg_lo = ph.vaddr;
+    uint64 seg_hi = ph.vaddr + ph.memsz;
+    if(p->vmaps[p->vmaps_len-1].perms & PTE_X){
+      if(p->text_lo == 0 || seg_lo < p->text_lo) p->text_lo = seg_lo;
+      if(seg_hi > p->text_hi) p->text_hi = seg_hi;
+    } 
+    else{
+      if(p->data_lo == 0 || seg_lo < p->data_lo) p->data_lo = seg_lo;
+      if(seg_hi > p->data_hi) p->data_hi = seg_hi;
+    }
+
+    if(seg_hi > sz) sz = seg_hi;
   }
+
+  // Drop previous exec image reference if any, then keep a referenced
+  // copy of the new executable for demand loads
+  if(p->exec_ip)
+    iput(p->exec_ip);
+  p->exec_ip = idup(ip);
+
   iunlockput(ip);
   end_op();
   ip = 0;
@@ -81,17 +112,21 @@ kexec(char *path, char **argv)
   p = myproc();
   uint64 oldsz = p->sz;
 
-  // Allocate some pages at the next page boundary.
-  // Make the first inaccessible as a stack guard.
-  // Use the rest as the user stack.
+  // Reserve stack space only; allocate pages on demand
   sz = PGROUNDUP(sz);
-  uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
-    goto bad;
-  sz = sz1;
-  uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
+  sz = sz + (USERSTACK+1)*PGSIZE;   // guard + USERSTACK pages
   sp = sz;
   stackbase = sp - USERSTACK*PGSIZE;
+  p->stack_top = sp;
+  
+  // Make reserved layout visible to the fault resolver before copyouts
+  // so stack faults are classified correctly.
+  p->heap_start = p->data_hi;
+  p->sz = sz;
+
+  // Reset per-process FIFO residency tracking for Part 2
+  p->res_head = p->res_tail = p->res_count = 0;
+  p->next_fifo_seq = 1;
 
   // Copy argument strings into new stack, remember their
   // addresses in ustack[].
@@ -135,6 +170,11 @@ kexec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  printf("[pid %d] INIT-LAZYMAP text=[%p,%p) data=[%p,%p) heap_start=%p stack_top=%p\n",
+         p->pid, (void*)p->text_lo, (void*)p->text_hi,
+         (void*)p->data_lo, (void*)p->data_hi,
+         (void*)p->data_hi, (void*)p->stack_top);
+
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
@@ -151,6 +191,9 @@ kexec(char *path, char **argv)
 // va must be page-aligned
 // and the pages from va to va+sz must already be mapped.
 // Returns 0 on success, -1 on failure.
+
+// Not used anywhere
+#if 0
 static int
 loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
 {
@@ -171,3 +214,4 @@ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz
   
   return 0;
 }
+#endif

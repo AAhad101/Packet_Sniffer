@@ -125,6 +125,17 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  // Setting the values of the newly defined fields in the proc struct
+  p->vmaps_len = 0;
+  p->exec_ip = 0;
+  p->text_lo = p->text_hi = 0;
+  p->data_lo = p->data_hi = 0;
+  p->heap_start = 0;
+  p->stack_top = 0;
+  p->next_fifo_seq = 1;
+
+  p->res_head = p->res_tail = p->res_count = 0;
+  
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -155,6 +166,12 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  if(p->exec_ip){
+    iput(p->exec_ip);
+    p->exec_ip = 0;
+  }
+  p->vmaps_len = 0;
+
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
@@ -169,6 +186,8 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  p->res_count = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -275,6 +294,21 @@ kfork(void)
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
+
+  // Inherit lazy exec mappings and state
+  np->vmaps_len = p->vmaps_len;
+  for(i = 0; i < p->vmaps_len; i++)
+    np->vmaps[i] = p->vmaps[i];
+
+  np->text_lo = p->text_lo; np->text_hi = p->text_hi;
+  np->data_lo = p->data_lo; np->data_hi = p->data_hi;
+  np->heap_start = p->heap_start;
+  np->stack_top = p->stack_top;
+  np->next_fifo_seq = p->next_fifo_seq;
+
+  np->exec_ip = 0;
+  if(p->exec_ip)
+    np->exec_ip = idup(p->exec_ip);
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;

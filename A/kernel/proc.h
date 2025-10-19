@@ -81,6 +81,24 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+struct vmap {
+  uint64 vaddr;     // segment virtual base (page-aligned)
+  uint64 memsz;     // in-memory size
+  uint64 filesz;    // file-backed size
+  uint64 off;       // file offset
+  int perms;        // PTE_X and/or PTE_W (can OR PTE_U|PTE_R at map time)
+};
+
+#define MAX_VMAPS 16
+
+// Per-process FIFO of resident user pages (for Part 2 eviction)
+#define MAX_RES_PAGES 4096
+struct respage {
+  uint64 va;
+  int seq;
+  int kind; // 0=exec, 1=heap, 2=stack
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +122,21 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // Lazy exec metadata
+  struct vmap vmaps[MAX_VMAPS];
+  int vmaps_len;
+  struct inode *exec_ip;
+
+  // Ranges to classify faults and log INIT-LAZYMAP
+  uint64 text_lo, text_hi;    // [text_lo, text_hi)
+  uint64 data_lo, data_hi;    // [data_lo, data_hi)
+  uint64 heap_start;          // end of data
+  uint64 stack_top;           // initial SP
+
+  // FIFO seq for RESIDENT logs
+  int next_fifo_seq;
+
+  struct respage res_pages[MAX_RES_PAGES];
+  int res_head, res_tail, res_count;
 };

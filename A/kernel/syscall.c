@@ -144,4 +144,6 @@ syscall(void)
             p->pid, p->name, num);
     p->trapframe->a0 = -1;
   }
+
+  //printf("Syscall num: %d\n", num);
 }

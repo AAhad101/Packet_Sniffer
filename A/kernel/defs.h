@@ -54,9 +54,6 @@ void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
 void            ireclaim(int);
-// sysfile.c helpers for kernel-internal create/unlink
-struct inode*   kcreate(char *path, short type, short major, short minor);
-int             kunlink(char *path);
 
 // kalloc.c
 void*           kalloc(void);

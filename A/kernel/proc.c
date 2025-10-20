@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "stat.h"
 
 struct cpu cpus[NCPU];
 
@@ -135,12 +139,6 @@ found:
   p->next_fifo_seq = 1;
 
   p->res_head = p->res_tail = p->res_count = 0;
-
-  // Part 3 init: per-process swap metadata
-  p->swap_ip = 0;
-  p->swap_used_count = 0;
-  for (int si = 0; si < 1024; si++) p->swap_used[si] = 0;
-  for (int si = 0; si < 1024; si++) p->swap_va[si] = 0;
   
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -331,6 +329,51 @@ kfork(void)
 
   release(&np->lock);
 
+  // Part 3: create per-process swap file for forked child
+  // Build "/pgswpXXXXX" using child's pid
+  safestrcpy(np->swap_path, "/pgswp00000", sizeof(np->swap_path));
+  {
+    int cpid = np->pid;
+    np->swap_path[10] = '0' + (cpid % 10); cpid /= 10;
+    np->swap_path[9]  = '0' + (cpid % 10); cpid /= 10;
+    np->swap_path[8]  = '0' + (cpid % 10); cpid /= 10;
+    np->swap_path[7]  = '0' + (cpid % 10); cpid /= 10;
+    np->swap_path[6]  = '0' + (cpid % 10);
+  }
+  begin_op();
+  {
+    struct inode *dp = 0, *ip2 = 0;
+    char name[DIRSIZ];
+    if((dp = nameiparent(np->swap_path, name)) != 0){
+      ilock(dp);
+      uint off;
+      if((ip2 = dirlookup(dp, name, &off)) != 0){
+        ilock(ip2);
+        np->swap_ip = ip2;
+        iunlock(ip2);
+      } else {
+        struct inode *nip = ialloc(dp->dev, T_FILE);
+        if(nip){
+          ilock(nip);
+          nip->nlink = 1;
+          iupdate(nip);
+          if(dirlink(dp, name, nip->inum) >= 0){
+            np->swap_ip = nip;
+            iunlock(nip);
+          } else {
+            iunlockput(nip);
+          }
+        }
+      }
+      iunlockput(dp);
+    }
+  }
+  end_op();
+  np->swap_used_count = 0;
+  for(int si=0; si<1024; si++){ np->swap_slot_used[si]=0; np->swap_slot_va[si]=0; }
+  printf("[pid %d] SWAPDBG init swap_ip=%p path=%s used=%d\n",
+         np->pid, np->swap_ip, np->swap_path, np->swap_used_count);
+
   acquire(&wait_lock);
   np->parent = p;
   release(&wait_lock);
@@ -368,27 +411,6 @@ kexit(int status)
   if(p == initproc)
     panic("init exiting");
 
-  // Part 3: swap cleanup and unlink per-process swap file
-  if (p->swap_ip) {
-    int freed = p->swap_used_count;
-    printf("[pid %d] SWAPCLEANUP freed_slots=%d\n", p->pid, freed);
-    // Build path /pgswpPID
-    char path[32];
-    int i = 0;
-    path[i++] = '/'; path[i++] = 'p'; path[i++] = 'g'; path[i++] = 's'; path[i++] = 'w'; path[i++] = 'p';
-    int pid = p->pid;
-    char tmp[16]; int t = 0;
-    do { tmp[t++] = '0' + (pid % 10); pid /= 10; } while(pid);
-    for (int j = t - 1; j >= 0; j--) path[i++] = tmp[j];
-    path[i] = 0;
-    kunlink(path);
-    // Drop our inode reference within a transaction as it may write metadata
-    begin_op();
-    iput(p->swap_ip);
-    end_op();
-    p->swap_ip = 0;
-  }
-
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
@@ -403,6 +425,22 @@ kexit(int status)
   end_op();
   p->cwd = 0;
 
+  // Part 3: cleanup per-process swap slots and release swap inode
+  if(p->swap_ip){
+    int freed = 0;
+    for(int i=0;i<1024;i++){
+      if(p->swap_slot_used[i]){ freed++; p->swap_slot_used[i]=0; p->swap_slot_va[i]=0; }
+    }
+    if(p->swap_used_count > 0) p->swap_used_count = 0;
+    printf("[pid %d] SWAPCLEANUP freed_slots=%d\n", p->pid, freed);
+    // Drop our reference to the inode; directory entry may persist.
+    begin_op();
+    iput(p->swap_ip);
+    end_op();
+    p->swap_ip = 0;
+    p->swap_path[0] = 0;
+  }
+
   acquire(&wait_lock);
 
   // Give any children to init.
@@ -416,6 +454,8 @@ kexit(int status)
   p->xstate = status;
   p->state = ZOMBIE;
 
+  // Must release wait_lock before yielding to scheduler,
+  // but keep holding p->lock for sched() sanity checks.
   release(&wait_lock);
 
   // Jump into the scheduler, never to return.

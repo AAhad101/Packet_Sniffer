@@ -1,4 +1,5 @@
 #define SBRK_ERROR ((char *)-1)
+#include "memstat.h"
 
 struct stat;
 
@@ -24,6 +25,7 @@ int getpid(void);
 char* sys_sbrk(int,int);
 int pause(int);
 int uptime(void);
+int memstat(struct proc_mem_stat *);
 
 // ulib.c
 int stat(const char*, struct stat*);

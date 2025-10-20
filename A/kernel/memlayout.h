@@ -37,7 +37,9 @@
 // for use by the kernel and user pages
 // from physical address 0x80000000 to PHYSTOP.
 #define KERNBASE 0x80000000L
-#define PHYSTOP (KERNBASE + 8*1024*1024)   // Change accordingly for testing stuff
+// Originially 128*1024*1024
+#define PHYSTOP (KERNBASE + 64*1024*1024)   // To test part 2, make it 12 or something
+
 // map the trampoline page to the highest address,
 // in both user and kernel space.
 #define TRAMPOLINE (MAXVA - PGSIZE)

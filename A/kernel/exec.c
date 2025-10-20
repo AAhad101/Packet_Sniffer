@@ -7,6 +7,8 @@
 #include "defs.h"
 #include "elf.h"
 #include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
 #include "stat.h"
 
 //static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
@@ -126,32 +128,9 @@ kexec(char *path, char **argv)
   p->heap_start = p->data_hi;
   p->sz = sz;
 
-  // Reset per-process resident set (pages will be repopulated lazily after exec)
+  // Reset per-process FIFO residency tracking for Part 2
   p->res_head = p->res_tail = p->res_count = 0;
-
-  // Part 3: create per-process swap file /pgswpPID and reset swap slots
-  {
-    // Clean any previous reference
-    if (p->swap_ip) { iput(p->swap_ip); p->swap_ip = 0; }
-    p->swap_used_count = 0;
-    for (int si = 0; si < 1024; si++) p->swap_used[si] = 0;
-    // Build path
-    char path[32]; int i = 0;
-    path[i++] = '/'; path[i++] = 'p'; path[i++] = 'g'; path[i++] = 's'; path[i++] = 'w'; path[i++] = 'p';
-    int pid = p->pid; char tmp[16]; int t = 0; do { tmp[t++] = '0' + (pid % 10); pid /= 10; } while(pid);
-    for (int j = t - 1; j >= 0; j--) path[i++] = tmp[j];
-    path[i] = 0;
-    // Create file
-    struct inode *sip = kcreate(path, T_FILE, 0, 0);
-    if (sip)
-      p->swap_ip = sip;
-  }
-
-  // Log INIT-LAZYMAP before any copyout that may trigger a page fault for this process
-  printf("[pid %d] INIT-LAZYMAP text=[%p,%p) data=[%p,%p) heap_start=%p stack_top=%p\n",
-         p->pid, (void*)p->text_lo, (void*)p->text_hi,
-         (void*)p->data_lo, (void*)p->data_hi,
-         (void*)p->data_hi, (void*)p->stack_top);
+  p->next_fifo_seq = 1;
 
   // Copy argument strings into new stack, remember their
   // addresses in ustack[].
@@ -194,6 +173,59 @@ kexec(char *path, char **argv)
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
+
+  // Part 3: create per-process swap file /pgswpXXXXX
+  // Build path safely: "/pgswp00000" then overwrite indices 6..10 with PID digits
+  safestrcpy(p->swap_path, "/pgswp00000", sizeof(p->swap_path));
+  int pid = p->pid;
+  p->swap_path[10] = '0' + (pid % 10); pid /= 10;
+  p->swap_path[9]  = '0' + (pid % 10); pid /= 10;
+  p->swap_path[8]  = '0' + (pid % 10); pid /= 10;
+  p->swap_path[7]  = '0' + (pid % 10); pid /= 10;
+  p->swap_path[6]  = '0' + (pid % 10);
+  begin_op();
+  struct inode *dp = 0, *ip2 = 0;
+  char name[DIRSIZ];
+  if((dp = nameiparent(p->swap_path, name)) != 0){
+    ilock(dp);
+    // if exists, reuse it; else create
+    uint off;
+    if((ip2 = dirlookup(dp, name, &off)) != 0){
+      // reuse existing inode
+      ilock(ip2);
+      p->swap_ip = ip2;
+      iunlock(ip2);
+    } else {
+      // create new regular file
+      struct inode *ip = ialloc(dp->dev, T_FILE);
+      if(ip){
+        ilock(ip);
+        ip->nlink = 1;
+        iupdate(ip);
+        if(dirlink(dp, name, ip->inum) >= 0){
+          // keep a reference but release the lock
+          p->swap_ip = ip;
+          iunlock(ip);
+        } else {
+          iunlockput(ip);
+        }
+      }
+    }
+    iunlockput(dp);
+  }
+  end_op();
+  // init swap bookkeeping
+  p->swap_used_count = 0;
+  for(int i=0;i<1024;i++){ p->swap_slot_used[i]=0; p->swap_slot_va[i]=0; }
+
+  // Debug: confirm per-process swap file setup
+  printf("[pid %d] SWAPDBG init swap_ip=%p path=%s used=%d\n",
+         p->pid, p->swap_ip, p->swap_path, p->swap_used_count);
+
+  printf("[pid %d] INIT-LAZYMAP text=[%p,%p) data=[%p,%p) heap_start=%p stack_top=%p\n",
+         p->pid, (void*)p->text_lo, (void*)p->text_hi,
+         (void*)p->data_lo, (void*)p->data_hi,
+         (void*)p->data_hi, (void*)p->stack_top);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 

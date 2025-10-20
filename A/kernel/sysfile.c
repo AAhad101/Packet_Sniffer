@@ -16,10 +16,6 @@
 #include "file.h"
 #include "fcntl.h"
 
-// Forward declarations for static helpers defined later in this file
-static struct inode* create(char *path, short type, short major, short minor);
-static int isdirempty(struct inode *dp);
-
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -35,75 +31,6 @@ argfd(int n, int *pfd, struct file **pf)
     *pfd = fd;
   if(pf)
     *pf = f;
-  return 0;
-}
-
-// Kernel-internal create helper: returns referenced inode or 0 on error.
-// Caller should iunlock/iput as needed.
-struct inode*
-kcreate(char *path, short type, short major, short minor)
-{
-  struct inode *ip;
-  begin_op();
-  ip = create(path, type, major, minor);
-  if(ip == 0){
-    end_op();
-    return 0;
-  }
-  // Leave the inode locked/unlocked consistent with sys_open(): unlock before returning
-  iunlock(ip);
-  end_op();
-  return ip;
-}
-
-// Kernel-internal unlink helper: returns 0 on success, -1 on error.
-int
-kunlink(char *path)
-{
-  struct inode *ip, *dp;
-  struct dirent de;
-  char name[DIRSIZ];
-  uint off;
-
-  begin_op();
-  if((dp = nameiparent(path, name)) == 0){
-    end_op();
-    return -1;
-  }
-  ilock(dp);
-  if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0){
-    iunlockput(dp);
-    end_op();
-    return -1;
-  }
-  if((ip = dirlookup(dp, name, &off)) == 0){
-    iunlockput(dp);
-    end_op();
-    return -1;
-  }
-  ilock(ip);
-  if(ip->nlink < 1){
-    panic("kunlink: nlink < 1");
-  }
-  if(ip->type == T_DIR && !isdirempty(ip)){
-    iunlockput(ip);
-    iunlockput(dp);
-    end_op();
-    return -1;
-  }
-  memset(&de, 0, sizeof(de));
-  if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
-    panic("kunlink: writei");
-  if(ip->type == T_DIR){
-    dp->nlink--;
-    iupdate(dp);
-  }
-  iunlockput(dp);
-
-  ip->nlink--;
-  iupdate(ip);
-  iunlockput(ip);
-  end_op();
   return 0;
 }
 

@@ -135,6 +135,12 @@ found:
   p->next_fifo_seq = 1;
 
   p->res_head = p->res_tail = p->res_count = 0;
+
+  // Part 3 init: per-process swap metadata
+  p->swap_ip = 0;
+  p->swap_used_count = 0;
+  for (int si = 0; si < 1024; si++) p->swap_used[si] = 0;
+  for (int si = 0; si < 1024; si++) p->swap_va[si] = 0;
   
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -361,6 +367,27 @@ kexit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Part 3: swap cleanup and unlink per-process swap file
+  if (p->swap_ip) {
+    int freed = p->swap_used_count;
+    printf("[pid %d] SWAPCLEANUP freed_slots=%d\n", p->pid, freed);
+    // Build path /pgswpPID
+    char path[32];
+    int i = 0;
+    path[i++] = '/'; path[i++] = 'p'; path[i++] = 'g'; path[i++] = 's'; path[i++] = 'w'; path[i++] = 'p';
+    int pid = p->pid;
+    char tmp[16]; int t = 0;
+    do { tmp[t++] = '0' + (pid % 10); pid /= 10; } while(pid);
+    for (int j = t - 1; j >= 0; j--) path[i++] = tmp[j];
+    path[i] = 0;
+    kunlink(path);
+    // Drop our inode reference within a transaction as it may write metadata
+    begin_op();
+    iput(p->swap_ip);
+    end_op();
+    p->swap_ip = 0;
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

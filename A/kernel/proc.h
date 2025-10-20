@@ -139,4 +139,11 @@ struct proc {
 
   struct respage res_pages[MAX_RES_PAGES];
   int res_head, res_tail, res_count;
+
+  // Part 3: Per-process swap metadata
+  // Up to 1024 page-sized slots per process (4MB)
+  struct inode *swap_ip;     // swap file inode, if created
+  unsigned char swap_used[1024]; // 0=free, 1=used
+  int swap_used_count;       // number of allocated slots
+  uint64 swap_va[1024];      // VA mapped to each slot (0 means free)
 };

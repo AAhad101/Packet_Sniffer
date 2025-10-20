@@ -2749,7 +2749,7 @@ struct test {
   {sbrkmuch, "sbrkmuch"},
   {kernmem, "kernmem"},
   {MAXVAplus, "MAXVAplus"},
-  //{sbrkfail, "sbrkfail"},   // Comment out while running usertests
+  {sbrkfail, "sbrkfail"},   // Comment out while running usertests
   {sbrkarg, "sbrkarg"},
   {validatetest, "validatetest"},
   {bsstest, "bsstest"},

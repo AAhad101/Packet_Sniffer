@@ -11,7 +11,7 @@
 
 // Set to 1 for detailed page fault logging; 0 to reduce verbosity
 #ifndef VERBOSE_PAGING
-#define VERBOSE_PAGING 0 
+#define VERBOSE_PAGING 1 
 #endif
 
 /*

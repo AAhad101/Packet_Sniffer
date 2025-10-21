@@ -54,6 +54,9 @@ void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
 void            ireclaim(int);
+// kernel wrappers for file create/unlink (for swap files)
+struct inode*   kcreate(char *path, short type);
+int             kunlink(char *path);
 
 // kalloc.c
 void*           kalloc(void);

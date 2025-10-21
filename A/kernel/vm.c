@@ -10,7 +10,7 @@
 
 // Set to 1 for detailed page fault logging; 0 to reduce verbosity
 #ifndef VERBOSE_PAGING
-#define VERBOSE_PAGING 1 
+#define VERBOSE_PAGING 1  
 #endif
 
 /*
@@ -506,16 +506,11 @@ ismapped(pagetable_t pagetable, uint64 va)
 }
 
 // Classify a user VA into "exec", "heap", or "stack".
-// Returns a const string ("swap","exec","heap","stack") or 0 if invalid.
+// Returns a const string or 0 if invalid.
 const char*
 classify_fault_cause(struct proc *p, uint64 va)
 {
   va = PGROUNDDOWN(va);
-  // Swapped page?
-  for(int i=0;i<1024;i++){
-    if(p->swap_slot_used[i] && p->swap_slot_va[i] == va)
-      return "swap";
-  }
   // Exec/data segment?
   for(int i = 0; i < p->vmaps_len; i++){
     uint64 lo = p->vmaps[i].vaddr;
@@ -583,7 +578,6 @@ fifo_enqueue(struct proc *p, uint64 va, int kind, int seq)
   p->res_pages[idx].va = va;
   p->res_pages[idx].seq = seq;
   p->res_pages[idx].kind = kind;
-  p->res_pages[idx].dirty = 0;
   p->res_tail = (p->res_tail + 1) % MAX_RES_PAGES;
   p->res_count++;
 }
@@ -615,102 +609,130 @@ fifo_remove_va(struct proc *p, uint64 va)
 int
 try_evict_one(struct proc *p)
 {
+  // FIFO: choose the oldest still-mapped page and evict it.
   if (p->res_count == 0)
     return 0;
 
-  // Pass 1: prefer heap pages (kind==1) to reduce exec thrash.
-  // Pass 2: consider any non-stack page (kind!=2).
-  // Pass 3: consider any page.
-  for (int pass = 0; pass < 3; pass++) {
-    int n = p->res_count;
-    int i = p->res_head;
-    while (n-- > 0) {
-      struct respage *e = &p->res_pages[i];
-      uint64 va = e->va;
-      int k = e->kind;
+  int n = p->res_count;
+  int idx = p->res_head;
+  struct respage victim;
+  int found_index = -1;
 
-      if ((pass == 0 && k != 1) || (pass == 1 && k == 2)) {
-        i = (i + 1) % MAX_RES_PAGES;
-        continue;
-      }
-
-      // Check mapping still present and user-accessible
-      pte_t *pte = walk(p->pagetable, va, 0);
-      if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-        uint64 pa = PTE2PA(*pte);
-        if (VERBOSE_PAGING)
-          printf("[pid %d] VICTIM va=%p seq=%d algo=FIFO\n", p->pid, (void*)va, e->seq);
-
-        int is_exec = (e->kind == 0);
-        int is_dirty = e->dirty;
-
-        // Clean discard allowed only if valid backing exists (exec/data-backed and not dirty)
-        if (!is_dirty && is_exec) {
-          if (VERBOSE_PAGING) {
-            printf("[pid %d] EVICT  va=%p state=clean\n", p->pid, (void*)va);
-            printf("[pid %d] DISCARD va=%p\n", p->pid, (void*)va);
-          }
-          *pte = 0;
-          sfence_vma();
-          kfree((void*)pa);
-        } else {
-          // Need to swap out
-          int slot = -1;
-          for(int s=0;s<1024;s++) if(!p->swap_slot_used[s]){ slot=s; break; }
-          if(slot < 0){
-            if (VERBOSE_PAGING)
-              printf("[pid %d] SWAPFULL reason=no-free-slot used=%d\n", p->pid, p->swap_used_count);
-            printf("[pid %d] KILL swap-exhausted\n", p->pid);
-            setkilled(p);
-            return 0;
-          }
-          // write page to swap file
-          if(p->swap_ip == 0){
-            if (VERBOSE_PAGING)
-              printf("[pid %d] SWAPFULL reason=no-swap-file path=%s\n", p->pid, p->swap_path);
-            printf("[pid %d] KILL swap-exhausted\n", p->pid);
-            setkilled(p);
-            return 0;
-          }
-          // Perform swap write inside a file-system transaction
-          begin_op();
-          ilock(p->swap_ip);
-          if (VERBOSE_PAGING)
-            printf("[pid %d] SWAPDBG write slot=%d ip=%p va=%p\n", p->pid, slot, p->swap_ip, (void*)va);
-          if(writei(p->swap_ip, 0, pa, slot*PGSIZE, PGSIZE) != PGSIZE){
-            iunlock(p->swap_ip);
-            end_op();
-            if (VERBOSE_PAGING)
-              printf("[pid %d] SWAPFULL reason=write-failed slot=%d\n", p->pid, slot);
-            printf("[pid %d] KILL swap-exhausted\n", p->pid);
-            setkilled(p);
-            return 0;
-          }
-          iunlock(p->swap_ip);
-          end_op();
-          if (VERBOSE_PAGING) {
-            printf("[pid %d] EVICT  va=%p state=dirty\n", p->pid, (void*)va);
-            printf("[pid %d] SWAPOUT va=%p slot=%d\n", p->pid, (void*)va, slot);
-          }
-          p->swap_slot_used[slot]=1; p->swap_slot_va[slot]=va; p->swap_used_count++;
-          *pte = 0;
-          sfence_vma();
-          kfree((void*)pa);
-        }
-
-        // Properly remove this VA from the FIFO to maintain order
-        if (!fifo_remove_va(p, va)) {
-          p->res_head = (p->res_head + 1) % MAX_RES_PAGES;
-          if (p->res_count > 0)
-            p->res_count--;
-        }
-        return 1;
-      }
-      // advance to next FIFO element
-      i = (i + 1) % MAX_RES_PAGES;
+  for (int k = 0; k < n; k++) {
+    struct respage *e = &p->res_pages[idx];
+    uint64 va = e->va;
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (!(pte && (*pte & PTE_V) && (*pte & PTE_U))) {
+      // Drop stale
+      fifo_remove_va(p, va);
+      n = p->res_count;
+      idx = p->res_head;
+      k = -1;
+      continue;
     }
+    victim = *e;
+    found_index = idx;
+    break;
   }
-  return 0;
+
+  if (found_index < 0)
+    return 0;
+
+  // Re-fetch PTE/PA in case it changed.
+  pte_t *pte = walk(p->pagetable, victim.va, 0);
+  if (!(pte && (*pte & PTE_V) && (*pte & PTE_U))) {
+    fifo_remove_va(p, victim.va);
+    return 0;
+  }
+
+  uint64 pa = PTE2PA(*pte);
+  int is_writable = ((*pte & PTE_W) != 0);
+
+  if (VERBOSE_PAGING)
+    printf("[pid %d] VICTIM va=%p seq=%d algo=FIFO\n", p->pid, (void*)victim.va, victim.seq);
+
+  // Determine if the page can be discarded (clean & backed) or must be swapped.
+  int clean_discard = 0;
+  if (!is_writable) {
+    // Non-writable page: treat as clean and backed (text/rodata) -> DISCARD
+    clean_discard = 1;
+  }
+
+  if (clean_discard) {
+    // Unmap and free the frame, log EVICT clean and DISCARD
+    *pte = 0;
+    sfence_vma();
+    kfree((void*)pa);
+    if (VERBOSE_PAGING) {
+      printf("[pid %d] EVICT  va=%p state=clean\n", p->pid, (void*)victim.va);
+      printf("[pid %d] DISCARD va=%p\n", p->pid, (void*)victim.va);
+    }
+    fifo_remove_va(p, victim.va);
+    return 1;
+  }
+
+  // Dirty or non-backed page: need to SWAPOUT
+  // Find a free swap slot.
+  int slot = -1;
+  for (int s = 0; s < MAX_SWAP_SLOTS; s++) {
+    int byte = s / 8, bit = s % 8;
+    if ((p->swap_bitmap[byte] & (1 << bit)) == 0) { slot = s; break; }
+  }
+  if (slot < 0) {
+    if (VERBOSE_PAGING) {
+      printf("[pid %d] EVICT  va=%p state=dirty\n", p->pid, (void*)victim.va);
+      printf("[pid %d] SWAPFULL\n", p->pid);
+      printf("[pid %d] KILL swap-exhausted\n", p->pid);
+    }
+    setkilled(p);
+    return 0;
+  }
+
+  // Write page to swap slot.
+  if (p->swap_ip == 0) {
+    // Should not happen if exec created the swap file, but guard anyway.
+    if (VERBOSE_PAGING) {
+      printf("[pid %d] EVICT  va=%p state=dirty\n", p->pid, (void*)victim.va);
+      printf("[pid %d] SWAPFULL\n", p->pid);
+      printf("[pid %d] KILL swap-exhausted\n", p->pid);
+    }
+    setkilled(p);
+    return 0;
+  }
+
+  begin_op();
+  ilock(p->swap_ip);
+  uint off = slot * PGSIZE;
+  int wr = writei(p->swap_ip, 0, pa, off, PGSIZE);
+  iunlock(p->swap_ip);
+  end_op();
+  if (wr != PGSIZE) {
+    // I/O error: kill the process.
+    if (VERBOSE_PAGING) {
+      printf("[pid %d] EVICT  va=%p state=dirty\n", p->pid, (void*)victim.va);
+      printf("[pid %d] KILL swap-exhausted\n", p->pid);
+    }
+    setkilled(p);
+    return 0;
+  }
+
+  // Mark slot used and remember mapping.
+  p->swap_pages[slot].va = victim.va;
+  p->swap_pages[slot].slot = slot;
+  p->swap_pages[slot].valid = 1;
+  p->swap_used++;
+  p->swap_bitmap[slot/8] |= (1 << (slot%8));
+
+  // Unmap and free the frame, then log in order: EVICT dirty -> SWAPOUT
+  *pte = 0;
+  sfence_vma();
+  kfree((void*)pa);
+  if (VERBOSE_PAGING) {
+    printf("[pid %d] EVICT  va=%p state=dirty\n", p->pid, (void*)victim.va);
+    printf("[pid %d] SWAPOUT slot=%d\n", p->pid, slot);
+  }
+  fifo_remove_va(p, victim.va);
+  return 1;
 }
 
 // Demand-paging resolver: map a page at va based on segment or zero-fill.
@@ -720,136 +742,150 @@ uint64
 demand_resolve(struct proc *p, pagetable_t pt, uint64 va, const char *access)
 {
   va = PGROUNDDOWN(va);
+  int memfull_logged = 0;
 
   // Never map outside the reserved user range
   if (va >= p->sz) {
     printf("[pid %d] PAGEFAULT va=%p access=%s cause=invalid\n", p->pid, (void*)va, access);
-    printf("[pid %d] KILL invalid-access va=%p access=%s\n", p->pid, (void*)va, access);
+    printf("[pid %d] KILL invalid-access\n", p->pid);
     setkilled(p);
     return 0;
   }
 
-  // If already mapped, just return pa.
-  uint64 pa0 = walkaddr(pt, va);
-  if(pa0 != 0)
-    return pa0;
-
+  // Determine cause and log PAGEFAULT first for all valid faults.
   const char *cause = classify_fault_cause(p, va);
   if(cause == 0){
-    // invalid access
     printf("[pid %d] PAGEFAULT va=%p access=%s cause=invalid\n", p->pid, (void*)va, access);
-    printf("[pid %d] KILL invalid-access va=%p access=%s\n", p->pid, (void*)va, access);
+    printf("[pid %d] KILL invalid-access\n", p->pid);
     setkilled(p);
     return 0;
   }
+  if (VERBOSE_PAGING) {
+    const char *logcause = (strncmp(cause, "heap", 4) == 0) ? "heap"
+                         : (strncmp(cause, "stack", 5) == 0) ? "stack"
+                         : "exec"; // treat both text and data as 'exec' for logging
+    printf("[pid %d] PAGEFAULT va=%p access=%s cause=%s\n", p->pid, (void*)va, access, logcause);
+  }
 
-  // Always log PAGEFAULT first
-  if (VERBOSE_PAGING)
-    printf("[pid %d] PAGEFAULT va=%p access=%s cause=%s\n", p->pid, (void*)va, access, cause);
+  // If page is swapped out for this process, swap it in.
+  for (int s = 0; s < MAX_SWAP_SLOTS; s++) {
+    if (p->swap_pages[s].valid && p->swap_pages[s].va == va) {
+      // Allocate a frame (with eviction if needed), then read from swap.
+      char *mem = kalloc();
+      if(mem == 0){
+        if (!memfull_logged) { printf("[pid %d] MEMFULL\n", p->pid); memfull_logged = 1; }
+        while (mem == 0) {
+          int evicted = 0;
+          for(int e = 0; e < 8; e++){
+            if(try_evict_one(p)) evicted++; else break;
+          }
+          if (evicted == 0) {
+            setkilled(p);
+            return 0;
+          }
+          if (killed(p)) {
+            return 0;
+          }
+          mem = kalloc();
+        }
+      }
+      // Read page from swap slot.
+      ilock(p->swap_ip);
+      int rd = readi(p->swap_ip, 0, (uint64)mem, s*PGSIZE, PGSIZE);
+      iunlock(p->swap_ip);
+      if (rd != PGSIZE) {
+        kfree(mem);
+        setkilled(p);
+        return 0;
+      }
+      // Map with appropriate perms according to classification.
+      int perms = PTE_U|PTE_R;
+      if (strncmp(cause, "exec", 4) == 0) {
+        struct vmap seg; is_exec_vaddr(p, va, &seg);
+        perms |= seg.perms; // may add PTE_X or PTE_W
+      } else {
+        // heap/stack: writable
+        perms |= PTE_W;
+      }
+      if (mappages(pt, va, PGSIZE, (uint64)mem, perms) != 0) {
+        kfree(mem); setkilled(p); return 0;
+      }
+      // Free the slot
+      p->swap_pages[s].valid = 0;
+      p->swap_bitmap[s/8] &= ~(1 << (s%8));
+      if (p->swap_used > 0) p->swap_used--;
+      if (VERBOSE_PAGING)
+        printf("[pid %d] SWAPIN\n", p->pid);
+      if (VERBOSE_PAGING)
+        printf("[pid %d] RESIDENT va=%p seq=%d\n", p->pid, (void*)va, p->next_fifo_seq++);
+      else
+        p->next_fifo_seq++;
+      int kind = page_kind_for_va(p, va);
+      fifo_enqueue(p, va, kind, p->next_fifo_seq - 1);
+      return walkaddr(pt, va);
+    }
+  }
 
-  // Forbid writes to exec/text segments: kill on direct page-faulting writes
+  // If already mapped, check protection; writes to non-writable pages are invalid.
+  uint64 pa0 = walkaddr(pt, va);
+  if(pa0 != 0){
+    pte_t *pte0 = walk(pt, va, 0);
+    if (pte0 && access && access[0] == 'w' && ((*pte0 & PTE_W) == 0)) {
+      printf("[pid %d] KILL invalid-access\n", p->pid);
+      setkilled(p);
+      return 0;
+    }
+    return pa0;
+  }
+
+  // cause is already computed and PAGEFAULT logged above
+
+  // Forbid writes to exec/text segments: treat as invalid-access per spec logging
   if (strncmp(cause, "exec", 4) == 0 && access && access[0] == 'w') {
-    printf("[pid %d] KILL write-to-exec va=%p access=%s\n", p->pid, (void*)va, access);
+    printf("[pid %d] KILL invalid-access\n", p->pid);
     setkilled(p);
     return 0;
   }
 
   char *mem = kalloc();
   if(mem == 0){
-    // For heap growth, do not evict to satisfy OOM: make sbrkfail semantics match xv6 tests
-    if (strncmp(cause, "heap", 4) == 0) {
-      if (VERBOSE_PAGING)
-      printf("[pid %d] MEMFULL\n", p->pid);
-      printf("[pid %d] KILL out-of-memory va=%p access=%s\n", p->pid, (void*)va, access);
-      setkilled(p);
-      return 0;
-    }
-    // For stack/exec/data, allow eviction and retry
-    printf("[pid %d] MEMFULL\n", p->pid);
+    if (!memfull_logged) { printf("[pid %d] MEMFULL\n", p->pid); memfull_logged = 1; }
     while (mem == 0) {
       int evicted = 0;
       for(int e = 0; e < 8; e++){
         if(try_evict_one(p)) evicted++; else break;
       }
       if (evicted == 0) {
-        printf("[pid %d] KILL out-of-memory va=%p access=%s\n", p->pid, (void*)va, access);
         setkilled(p);
         return 0;
       }
-      yield();
+      if (killed(p)) {
+        return 0;
+      }
       mem = kalloc();
     }
   }
   memset(mem, 0, PGSIZE);
 
-  if(strncmp(cause, "swap", 4) == 0){
-    // Swap-in path
-    int slot = -1;
-    for(int s=0;s<1024;s++) if(p->swap_slot_used[s] && p->swap_slot_va[s]==va){ slot=s; break; }
-    if(slot < 0){
-      // stale map; treat as invalid
-      printf("[pid %d] KILL invalid-access va=%p access=%s\n", p->pid, (void*)va, access);
-      setkilled(p);
-      kfree(mem);
-      return 0;
-    }
-    ilock(p->swap_ip);
-    if(readi(p->swap_ip, 0, (uint64)mem, slot*PGSIZE, PGSIZE) != PGSIZE){
-      iunlock(p->swap_ip);
-      kfree(mem);
-      return 0;
-    }
-    iunlock(p->swap_ip);
-    // map
-    for(;;){ if(mappages(pt, va, PGSIZE, (uint64)mem, PTE_U|PTE_R|PTE_W) == 0) break;
-      int ev=0; for(int e=0;e<8;e++){ if(try_evict_one(p)) ev++; else break; }
-      if(ev==0){ printf("[pid %d] KILL out-of-memory map va=%p access=%s\n", p->pid, (void*)va, access); setkilled(p); kfree(mem); return 0; }
-      yield(); }
-    if (VERBOSE_PAGING)
-      printf("[pid %d] SWAPIN va=%p slot=%d\n", p->pid, (void*)va, slot);
-    p->swap_slot_used[slot]=0; p->swap_slot_va[slot]=0; if(p->swap_used_count>0) p->swap_used_count--;
-    // enqueue
-    {
-      int seq = p->next_fifo_seq++;
-      int kind = page_kind_for_va(p, va); if(kind<0) kind=1; // default heap
-      fifo_enqueue(p, va, kind, seq);
-      if (VERBOSE_PAGING)
-        printf("[pid %d] RESIDENT va=%p seq=%d\n", p->pid, (void*)va, seq);
-      // mark dirty if this was a write fault
-      if(access && access[0]=='w'){
-        // set dirty on the newly enqueued tail-1
-        int idx = (p->res_tail + MAX_RES_PAGES - 1) % MAX_RES_PAGES;
-        p->res_pages[idx].dirty = 1;
+  if(strncmp(cause, "heap", 4) == 0 || strncmp(cause, "stack", 5) == 0){
+    // Zero-fill for heap/stack with eviction-retry for page table allocation too.
+    for(;;){
+      if(mappages(pt, va, PGSIZE, (uint64)mem, PTE_U|PTE_R|PTE_W) == 0)
+        break;
+      // mapping failed; try to evict and retry
+      if (!memfull_logged) { printf("[pid %d] MEMFULL\n", p->pid); memfull_logged = 1; }
+      int evicted = 0;
+      for(int e = 0; e < 8; e++){
+        if(try_evict_one(p)) evicted++; else break;
       }
-    }
-    return walkaddr(pt, va);
-  } else if(strncmp(cause, "heap", 4) == 0 || strncmp(cause, "stack", 5) == 0){
-    // Zero-fill for heap/stack
-    // mappages can itself require kalloc for page-table pages; retry with eviction.
-    if (strncmp(cause, "heap", 4) == 0) {
-      // For heap, do not evict to create page-table pages; fail fast to satisfy sbrk semantics
-      if(mappages(pt, va, PGSIZE, (uint64)mem, PTE_U|PTE_R|PTE_W) != 0){
-        printf("[pid %d] KILL out-of-memory map va=%p access=%s\n", p->pid, (void*)va, access);
+      if(evicted == 0){
         setkilled(p);
         kfree(mem);
         return 0;
       }
-    } else {
-      for(;;){
-        if(mappages(pt, va, PGSIZE, (uint64)mem, PTE_U|PTE_R|PTE_W) == 0)
-          break;
-        // mapping failed; try to evict and retry (stack)
-        int evicted = 0;
-        for(int e = 0; e < 8; e++){
-          if(try_evict_one(p)) evicted++; else break;
-        }
-        if(evicted == 0){
-          printf("[pid %d] KILL out-of-memory map va=%p access=%s\n", p->pid, (void*)va, access);
-          setkilled(p);
-          kfree(mem);
-          return 0;
-        }
-        yield();
+      if (killed(p)) {
+        kfree(mem);
+        return 0;
       }
     }
     if (VERBOSE_PAGING)
@@ -863,11 +899,6 @@ demand_resolve(struct proc *p, pagetable_t pt, uint64 va, const char *access)
       int seq = p->next_fifo_seq - 1;
       int kind = page_kind_for_va(p, va);
       fifo_enqueue(p, va, kind, seq);
-      // mark dirty if write fault
-      if(access && access[0]=='w'){
-        int idx = (p->res_tail + MAX_RES_PAGES - 1) % MAX_RES_PAGES;
-        p->res_pages[idx].dirty = 1;
-      }
     }
     return walkaddr(pt, va);
   }
@@ -877,7 +908,7 @@ demand_resolve(struct proc *p, pagetable_t pt, uint64 va, const char *access)
   if(!is_exec_vaddr(p, va, &seg)){
     // Shouldn't happen; double-check
     kfree(mem);
-    printf("[pid %d] KILL invalid-access va=%p access=%s\n", p->pid, (void*)va, access);
+    printf("[pid %d] KILL invalid-access\n", p->pid);
     setkilled(p);
     return 0;
   }
@@ -901,7 +932,7 @@ demand_resolve(struct proc *p, pagetable_t pt, uint64 va, const char *access)
 
   if(p->exec_ip == 0){
     kfree(mem);
-    printf("[pid %d] KILL invalid-access va=%p access=%s\n", p->pid, (void*)va, access);
+    printf("[pid %d] KILL invalid-access\n", p->pid);
     setkilled(p);
     return 0;
   }
@@ -920,17 +951,20 @@ demand_resolve(struct proc *p, pagetable_t pt, uint64 va, const char *access)
   for(;;){
     if(mappages(pt, va, PGSIZE, (uint64)mem, perms) == 0)
       break;
+    if (!memfull_logged) { printf("[pid %d] MEMFULL\n", p->pid); memfull_logged = 1; }
     int evicted = 0;
     for(int e = 0; e < 8; e++){
       if(try_evict_one(p)) evicted++; else break;
     }
     if(evicted == 0){
-      printf("[pid %d] KILL out-of-memory map va=%p access=%s\n", p->pid, (void*)va, access);
       setkilled(p);
       kfree(mem);
       return 0;
     }
-    yield();
+    if (killed(p)) {
+      kfree(mem);
+      return 0;
+    }
   }
 
   if (VERBOSE_PAGING)
@@ -944,10 +978,6 @@ demand_resolve(struct proc *p, pagetable_t pt, uint64 va, const char *access)
     int seq = p->next_fifo_seq - 1;
     int kind = page_kind_for_va(p, va);
     fifo_enqueue(p, va, kind, seq);
-    if(access && access[0]=='w'){
-      int idx = (p->res_tail + MAX_RES_PAGES - 1) % MAX_RES_PAGES;
-      p->res_pages[idx].dirty = 1;
-    }
   }
 
   return walkaddr(pt, va);

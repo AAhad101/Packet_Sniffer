@@ -97,7 +97,14 @@ struct respage {
   uint64 va;
   int seq;
   int kind; // 0=exec, 1=heap, 2=stack
-  int dirty; // Part 3: marked on first write
+};
+
+// Part 3: per-process swap state
+#define MAX_SWAP_SLOTS 1024
+struct swappage {
+  uint64 va;   // virtual address of swapped-out page (page-aligned)
+  short slot;  // swap slot index [0..MAX_SWAP_SLOTS)
+  char  valid; // 1 if mapping valid
 };
 
 // Per-process state
@@ -141,15 +148,9 @@ struct proc {
   struct respage res_pages[MAX_RES_PAGES];
   int res_head, res_tail, res_count;
 
-  // Part 3: per-process swap state
-  struct inode *swap_ip;            // inode of /pgswpXXXXX
-  int swap_slot_used[1024];         // bitmap (0/1) for 1024 slots
-  uint64 swap_slot_va[1024];        // VA stored at each slot, or 0 if free
-  int swap_used_count;              // number of occupied slots
-  char swap_path[32];               // cached path for unlink on exit
-
-  // Simple dirty tracking: mark VA dirty on first write fault
-  // For simplicity, track a small recent set via FIFO entries' kind/seq and a parallel bit flag per FIFO entry
-  // Alternatively, use a small fixed-size table here keyed by VA.
-  // We will implement dirty marking in vm.c using this helper when needed.
+  // Swap file and bookkeeping (Part 3)
+  struct inode *swap_ip;                       // per-process swap file inode
+  struct swappage swap_pages[MAX_SWAP_SLOTS];  // va -> slot map
+  int swap_used;                               // number of valid entries
+  unsigned char swap_bitmap[MAX_SWAP_SLOTS/8]; // free slot bitmap
 };

@@ -718,3 +718,94 @@ nameiparent(char *path, char *name)
 {
   return namex(path, 1, name);
 }
+
+// Kernel wrappers: create/unlink paths without going through syscalls.
+// Caller must bracket with begin_op()/end_op().
+struct inode*
+kcreate(char *path, short type)
+{
+  struct inode *ip, *dp;
+  char name[DIRSIZ];
+
+  if((dp = nameiparent(path, name)) == 0)
+    return 0;
+
+  ilock(dp);
+
+  if((ip = dirlookup(dp, name, 0)) != 0){
+    // Reuse existing regular file.
+    iunlockput(dp);
+    ilock(ip);
+    iunlock(ip);
+    return ip;
+  }
+
+  if((ip = ialloc(dp->dev, type)) == 0){
+    iunlockput(dp);
+    return 0;
+  }
+
+  ilock(ip);
+  ip->major = 0;
+  ip->minor = 0;
+  ip->nlink = 1;
+  iupdate(ip);
+
+  if(dirlink(dp, name, ip->inum) < 0){
+    // fail: de-allocate ip.
+    ip->nlink = 0;
+    iupdate(ip);
+    iunlockput(ip);
+    iunlockput(dp);
+    return 0;
+  }
+
+  iunlockput(dp);
+  // leave ip locked/unlocked? keep it unlocked for callers.
+  iunlock(ip);
+  return ip;
+}
+
+int
+kunlink(char *path)
+{
+  struct inode *ip, *dp;
+  struct dirent de;
+  char name[DIRSIZ];
+  uint off;
+
+  if((dp = nameiparent(path, name)) == 0)
+    return -1;
+
+  ilock(dp);
+
+  if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0){
+    iunlockput(dp);
+    return -1;
+  }
+
+  if((ip = dirlookup(dp, name, &off)) == 0){
+    iunlockput(dp);
+    return -1;
+  }
+  ilock(ip);
+
+  if(ip->nlink < 1)
+    panic("kunlink: nlink < 1");
+  if(ip->type == T_DIR){
+    iunlockput(ip);
+    iunlockput(dp);
+    return -1;
+  }
+
+  memset(&de, 0, sizeof(de));
+  if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
+    panic("kunlink: writei");
+
+  iunlockput(dp);
+
+  ip->nlink--;
+  iupdate(ip);
+  iunlockput(ip);
+  return 0;
+}

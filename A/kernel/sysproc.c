@@ -17,67 +17,6 @@ sys_exit(void)
   return 0;  // not reached
 }
 
-static int is_va_swapped(struct proc *p, uint64 va, int *slot_out){
-  for(int i=0;i<1024;i++){
-    if(p->swap_slot_used[i] && p->swap_slot_va[i]==va){ if(slot_out) *slot_out=i; return 1; }
-  }
-  return 0;
-}
-
-uint64
-sys_memstat(void)
-{
-  uint64 uaddr;
-  if(argaddr(0, &uaddr), 0){}
-  // Fetch user pointer
-  argaddr(0, &uaddr);
-  struct proc *p = myproc();
-  struct proc_mem_stat kinfo = {0};
-  kinfo.pid = p->pid;
-  kinfo.next_fifo_seq = p->next_fifo_seq;
-
-  // Determine reporting range: from text start (text_lo) to p->sz
-  uint64 start = p->text_lo;
-  uint64 end = p->sz;
-  int idx = 0;
-  for(uint64 va = PGROUNDDOWN(start); va < end; va += PGSIZE){
-    int state = UNMAPPED;
-    int is_dirty = 0;
-    int seq = 0;
-    int slot = -1;
-    uint64 pa = walkaddr(p->pagetable, va);
-    if(pa){
-      state = RESIDENT;
-      // lookup in FIFO to extract seq/dirty
-      int n = p->res_count; int i = p->res_head;
-      for(int k=0;k<n;k++){
-        struct respage *e = &p->res_pages[i];
-        if(e->va == va){ seq = e->seq; is_dirty = e->dirty; break; }
-        i = (i+1) % MAX_RES_PAGES;
-      }
-      kinfo.num_resident_pages++;
-    } else if(is_va_swapped(p, va, &slot)){
-      state = SWAPPED;
-      kinfo.num_swapped_pages++;
-    } else {
-      state = UNMAPPED;
-    }
-    kinfo.num_pages_total++;
-    if(idx < MAX_PAGES_INFO){
-      kinfo.pages[idx].va = (uint)va;
-      kinfo.pages[idx].state = state;
-      kinfo.pages[idx].is_dirty = is_dirty;
-      kinfo.pages[idx].seq = seq;
-      kinfo.pages[idx].swap_slot = slot;
-      idx++;
-    }
-  }
-
-  if(either_copyout(1, uaddr, &kinfo, sizeof(kinfo)) < 0)
-    return -1;
-  return 0;
-}
-
 uint64
 sys_getpid(void)
 {
@@ -159,4 +98,62 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+static int fifo_seq_for_va(struct proc *p, uint64 va)
+{
+  for (int k = 0; k < p->res_count; k++) {
+    int idx = (p->res_head + k) % MAX_RES_PAGES;
+    if (p->res_pages[idx].va == va)
+      return p->res_pages[idx].seq;
+  }
+  return -1;
+}
+
+uint64
+sys_memstat(void)
+{
+  struct proc *p = myproc();
+  uint64 uptr;
+  argaddr(0, &uptr);
+
+  struct proc_mem_stat k = {0};
+
+  // Enumerate resident pages by scanning mapped user PTEs up to
+  // the max of sz and stack_top.
+  uint64 limit = p->sz;
+  if (p->stack_top > limit) limit = p->stack_top;
+
+  for (uint64 va = 0; va < limit && k.num < MAX_PAGES_INFO; va += PGSIZE) {
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+      struct page_info *pi = &k.info[k.num++];
+      pi->va = va;
+      pi->state = P_RESIDENT;
+      pi->seq = fifo_seq_for_va(p, va);
+      // Dirty heuristic: heap/stack or writable => dirty; exec RO => clean
+      const char *c = classify_fault_cause(p, va);
+      if (c && (strncmp(c, "heap", 4) == 0 || strncmp(c, "stack", 5) == 0))
+        pi->is_dirty = 1;
+      else
+        pi->is_dirty = ((*pte & PTE_W) != 0);
+      pi->swap_slot = -1;
+    }
+  }
+
+  // Enumerate swapped pages from per-proc swap table
+  for (int s = 0; s < MAX_SWAP_SLOTS && k.num < MAX_PAGES_INFO; s++) {
+    if (p->swap_pages[s].valid) {
+      struct page_info *pi = &k.info[k.num++];
+      pi->va = p->swap_pages[s].va;
+      pi->state = P_SWAPPED;
+      pi->is_dirty = 1; // only dirty/non-backed pages are swapped out
+      pi->seq = -1;
+      pi->swap_slot = s;
+    }
+  }
+
+  if (copyout(p->pagetable, uptr, (char*)&k, sizeof(k)) < 0)
+    return -1;
+  return 0;
 }

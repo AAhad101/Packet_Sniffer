@@ -142,7 +142,13 @@ UPROGS=\
 	$U/_logstress\
 	$U/_forphan\
 	$U/_dorphan\
-	$U/_evicttest\
+	$U/_t_lazy\
+	$U/_t_invalid\
+	$U/_t_fifo\
+	$U/_t_wexec\
+	$U/_t_eviction\
+	$U/_t_swap\
+	$U/_t_memstat\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
@@ -174,10 +180,6 @@ QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 
 qemu: check-qemu-version $K/kernel fs.img
 	$(QEMU) $(QEMUOPTS)
-
-# Run with lower memory for swapping tests without changing the default config
-qemu-64m: check-qemu-version $K/kernel fs.img
-	$(QEMU) $(QEMUOPTS) -m 64M
 
 .gdbinit: .gdbinit.tmpl-riscv
 	sed "s/:1234/:$(GDBPORT)/" < $^ > $@

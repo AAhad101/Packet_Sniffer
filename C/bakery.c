@@ -38,7 +38,7 @@ sem_t oven_sem;
 pthread_mutex_t cash_register_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Customer structure
-typedef struct Customer{
+typedef struct Customer {
     int id;
     int enter_time;
     pthread_t thread;
@@ -64,7 +64,7 @@ int num_customers = 0;
 pthread_mutex_t customer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Chef structure
-typedef struct Chef{
+typedef struct Chef {
     int id;
     pthread_t thread;
 } Chef;
@@ -73,7 +73,7 @@ Chef chefs[NUM_CHEFS];
 bool simulation_done = false;
 
 // Thread-safe print
-void print_event(int timestamp, const char* format, ...){
+void print_event(int timestamp, const char* format, ...) {
     char buffer[256];
     va_list args;
     va_start(args, format);
@@ -87,7 +87,7 @@ void print_event(int timestamp, const char* format, ...){
 }
 
 // Get current simulation time
-int get_sim_time(){
+int get_sim_time() {
     pthread_mutex_lock(&time_mutex);
     int t = sim_time;
     pthread_mutex_unlock(&time_mutex);
@@ -95,18 +95,18 @@ int get_sim_time(){
 }
 
 // Wait until simulation reaches target time
-void wait_until(int target_time){
+void wait_until(int target_time) {
     pthread_mutex_lock(&time_mutex);
-    while(sim_time < target_time){
+    while (sim_time < target_time) {
         pthread_cond_wait(&time_cond, &time_mutex);
     }
     pthread_mutex_unlock(&time_mutex);
 }
 
 // Advance simulation time
-void advance_to(int new_time){
+void advance_to(int new_time) {
     pthread_mutex_lock(&time_mutex);
-    if(new_time > sim_time){
+    if (new_time > sim_time) {
         sim_time = new_time;
         pthread_cond_broadcast(&time_cond);
     }
@@ -114,12 +114,12 @@ void advance_to(int new_time){
 }
 
 // Find customer needing cake (FIFO order)
-Customer* find_customer_needing_cake(){
+Customer* find_customer_needing_cake() {
     pthread_mutex_lock(&customer_mutex);
-    for(int i = 0; i < num_customers; i++){
+    for (int i = 0; i < num_customers; i++) {
         Customer* c = customers[i];
         pthread_mutex_lock(&c->mutex);
-        if(c->cake_requested && !c->being_baked && !c->cake_ready && !c->left) {
+        if (c->cake_requested && !c->being_baked && !c->cake_ready && !c->left) {
             c->being_baked = true;
             pthread_mutex_unlock(&c->mutex);
             pthread_mutex_unlock(&customer_mutex);
@@ -134,10 +134,10 @@ Customer* find_customer_needing_cake(){
 // Find customer needing payment acceptance (FIFO order)
 Customer* find_customer_needing_payment() {
     pthread_mutex_lock(&customer_mutex);
-    for(int i = 0; i < num_customers; i++){
+    for (int i = 0; i < num_customers; i++) {
         Customer* c = customers[i];
         pthread_mutex_lock(&c->mutex);
-        if(c->paid && !c->being_paid && !c->payment_accepted && !c->left){
+        if (c->paid && !c->being_paid && !c->payment_accepted && !c->left) {
             c->being_paid = true;
             pthread_mutex_unlock(&c->mutex);
             pthread_mutex_unlock(&customer_mutex);
@@ -156,7 +156,7 @@ void* customer_function(void* arg) {
     wait_until(c->enter_time);
     
     pthread_mutex_lock(&shop_mutex);
-    if(customers_in_shop >= MAX_CAPACITY){
+    if (customers_in_shop >= MAX_CAPACITY) {
         pthread_mutex_unlock(&shop_mutex);
         c->left = true;
         return NULL;
@@ -165,16 +165,31 @@ void* customer_function(void* arg) {
     pthread_mutex_unlock(&shop_mutex);
     print_event(c->enter_time, "Customer %d enters", c->id);
     
-    wait_until(c->enter_time + 1);
-    
-    pthread_mutex_lock(&sofa_mutex);
-    while(sofa_count >= SOFA_CAPACITY){
-        pthread_cond_wait(&sofa_cond, &sofa_mutex);
+    // --- START OF UPDATED SITTING LOGIC ---
+    int attempt_sit_time = c->enter_time + 1;
+    while (1) {
+        wait_until(attempt_sit_time);
+        
+        pthread_mutex_lock(&sofa_mutex);
+        
+        if (sofa_count < SOFA_CAPACITY) {
+            // Success! A spot is free. Claim it.
+            sofa_count++;
+            c->sit_time = get_sim_time();
+            pthread_mutex_unlock(&sofa_mutex);
+            print_event(c->sit_time, "Customer %d sits", c->id);
+            break; // Exit the while(1) loop, we are seated.
+        } else {
+            // Sofa is full. Wait for a signal.
+            pthread_cond_wait(&sofa_cond, &sofa_mutex);
+            
+            // We have been woken up because a spot is free!
+            // But we must wait until the NEXT second to try and sit.
+            attempt_sit_time = get_sim_time() + 1;
+            pthread_mutex_unlock(&sofa_mutex);
+        }
     }
-    sofa_count++;
-    c->sit_time = get_sim_time();
-    pthread_mutex_unlock(&sofa_mutex);
-    print_event(c->sit_time, "Customer %d sits", c->id);
+    // --- END OF UPDATED SITTING LOGIC ---
     
     wait_until(c->sit_time + 1);
     
@@ -186,7 +201,7 @@ void* customer_function(void* arg) {
     
     int pay_time;
     pthread_mutex_lock(&c->mutex);
-    while(!c->cake_ready){
+    while (!c->cake_ready) {
         pthread_cond_wait(&c->cake_cond, &c->mutex);
     }
     pay_time = c->pay_time;
@@ -200,7 +215,7 @@ void* customer_function(void* arg) {
     print_event(pay_time, "Customer %d pays", c->id);
     
     pthread_mutex_lock(&c->mutex);
-    while(!c->payment_accepted){
+    while (!c->payment_accepted) {
         pthread_cond_wait(&c->payment_cond, &c->mutex);
     }
     int leave_time = get_sim_time();
@@ -225,20 +240,19 @@ void* customer_function(void* arg) {
 void* chef_function(void* arg) {
     Chef* chef = (Chef*)arg;
     
-    while(!simulation_done){
+    while (!simulation_done) {
         Customer* payment_customer = find_customer_needing_payment();
-        if(payment_customer){
+        if (payment_customer) {
             pthread_mutex_lock(&cash_register_mutex);
             
             // Implement nuanced timing rule for payment acceptance
             int current_time = get_sim_time();
             int start_time;
 
-            if(current_time == payment_customer->pay_time){
+            if (current_time == payment_customer->pay_time) {
                 // Customer just paid; chef needs to wait 1s to react
                 start_time = current_time + 1;
-            } 
-            else{
+            } else {
                 // Customer has been waiting; chef can start immediately
                 start_time = current_time;
             }
@@ -260,7 +274,7 @@ void* chef_function(void* arg) {
         }
         
         Customer* cake_customer = find_customer_needing_cake();
-        if(cake_customer){
+        if (cake_customer) {
             sem_wait(&oven_sem);
             
             int start_time = get_sim_time() + 1;
@@ -291,7 +305,7 @@ void* chef_function(void* arg) {
 void* time_thread_function(void* arg) {
     int* max_time = (int*)arg;
     
-    for(int t = 0; t <= *max_time + 50; t++){
+    for (int t = 0; t <= *max_time + 50; t++) {
         advance_to(t);
         usleep(5000);
     }
@@ -299,57 +313,57 @@ void* time_thread_function(void* arg) {
     return NULL;
 }
 
-int main(){
+int main() {
     sem_init(&oven_sem, 0, NUM_OVENS);
     
     char line[256];
     int max_enter_time = 0;
     
-    while(fgets(line, sizeof(line), stdin) != NULL){
-        if(feof(stdin) || strcmp(line, "<EOF>\n") == 0){
+    while (fgets(line, sizeof(line), stdin) != NULL) {
+        if (feof(stdin) || strcmp(line, "<EOF>\n") == 0) {
             break;
         }
         int enter_time, id;
-        if(sscanf(line, "%d Customer %d", &enter_time, &id) == 2){
+        if (sscanf(line, "%d Customer %d", &enter_time, &id) == 2) {
             Customer* c = malloc(sizeof(Customer));
             *c = (Customer){.id = id, .enter_time = enter_time};
             pthread_mutex_init(&c->mutex, NULL);
             pthread_cond_init(&c->cake_cond, NULL);
             pthread_cond_init(&c->payment_cond, NULL);
             customers[num_customers++] = c;
-            if(enter_time > max_enter_time){
+            if (enter_time > max_enter_time) {
                 max_enter_time = enter_time;
             }
         }
     }
     
-    if(num_customers == 0) return 0;
+    if (num_customers == 0) return 0;
     
     pthread_t time_thread;
     pthread_create(&time_thread, NULL, time_thread_function, &max_enter_time);
     
-    for(int i = 0; i < NUM_CHEFS; i++){
+    for (int i = 0; i < NUM_CHEFS; i++) {
         chefs[i].id = i + 1;
         pthread_create(&chefs[i].thread, NULL, chef_function, &chefs[i]);
     }
     
-    for(int i = 0; i < num_customers; i++){
+    for (int i = 0; i < num_customers; i++) {
         pthread_create(&customers[i]->thread, NULL, customer_function, customers[i]);
     }
     
-    for(int i = 0; i < num_customers; i++){
+    for (int i = 0; i < num_customers; i++) {
         pthread_join(customers[i]->thread, NULL);
     }
     
     wait_until(get_sim_time() + 5); 
     simulation_done = true;
     
-    for(int i = 0; i < NUM_CHEFS; i++){
+    for (int i = 0; i < NUM_CHEFS; i++) {
         pthread_join(chefs[i].thread, NULL);
     }
     pthread_join(time_thread, NULL);
     
-    for(int i = 0; i < num_customers; i++){
+    for (int i = 0; i < num_customers; i++) {
         pthread_mutex_destroy(&customers[i]->mutex);
         pthread_cond_destroy(&customers[i]->cake_cond);
         pthread_cond_destroy(&customers[i]->payment_cond);
@@ -360,4 +374,3 @@ int main(){
     
     return 0;
 }
-

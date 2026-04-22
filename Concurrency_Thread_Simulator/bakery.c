@@ -173,23 +173,22 @@ void* customer_function(void* arg) {
         pthread_mutex_lock(&sofa_mutex);
         
         if (sofa_count < SOFA_CAPACITY) {
-            // Success! A spot is free. Claim it.
+            // A spot is free
             sofa_count++;
             c->sit_time = get_sim_time();
             pthread_mutex_unlock(&sofa_mutex);
             print_event(c->sit_time, "Customer %d sits", c->id);
-            break; // Exit the while(1) loop, we are seated.
+            break; // Exit the while(1) loop we are seated
         } else {
-            // Sofa is full. Wait for a signal.
+            // Sofa is full, wait for a signal
             pthread_cond_wait(&sofa_cond, &sofa_mutex);
             
-            // We have been woken up because a spot is free!
-            // But we must wait until the NEXT second to try and sit.
+            // We have been woken up because a spot is free
+            // But we must wait until the NEXT second to try and sit
             attempt_sit_time = get_sim_time() + 1;
             pthread_mutex_unlock(&sofa_mutex);
         }
     }
-    // --- END OF UPDATED SITTING LOGIC ---
     
     wait_until(c->sit_time + 1);
     
@@ -245,7 +244,6 @@ void* chef_function(void* arg) {
         if (payment_customer) {
             pthread_mutex_lock(&cash_register_mutex);
             
-            // Implement nuanced timing rule for payment acceptance
             int current_time = get_sim_time();
             int start_time;
 

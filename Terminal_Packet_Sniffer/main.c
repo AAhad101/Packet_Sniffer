@@ -70,6 +70,8 @@ int main(){
         printf("[C-Shark] Interface '%s' selected. What's next?\n\n", selected_int->name);
         
         while(1){
+            ctrlc = 0;
+
             printf("1. Start Sniffing (All Packets)\n");
             printf("2. Start Sniffing (With Filters)\n");
             printf("3. Inspect Last Session\n");
